@@ -40,7 +40,7 @@ import java.util.*;
 
 @SupportsBatching
 @Tags({"PutIEC104", "IEC104", "Client", "IEC104Client"})
-@InputRequirement(InputRequirement.Requirement.INPUT_FORBIDDEN)
+@InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
 @TriggerSerially
 @CapabilityDescription("Create PutIEC104 Client")
 @SeeAlso({})

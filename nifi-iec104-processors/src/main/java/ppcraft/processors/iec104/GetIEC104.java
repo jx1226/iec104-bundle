@@ -81,6 +81,15 @@ public class GetIEC104 extends AbstractProcessor {
             .defaultValue("false")
             .build();
 
+    public static final PropertyDescriptor DATE_FORMAT_PROPERTY = new PropertyDescriptor
+            .Builder().name("DATE_FORMAT")
+            .displayName("Date format")
+            .description("Date format on controller")
+            .required(true)
+            .defaultValue("dd-MM-yy hh:mm:ss:SSS")
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .build();
+
     public static final Relationship SUCCESS = new Relationship.Builder()
             .name("success")
             .description("It's okay")
@@ -100,6 +109,7 @@ public class GetIEC104 extends AbstractProcessor {
         descriptors.add(IP_PROPERTY);
         descriptors.add(PORT_PROPERTY);
         descriptors.add(FULL_PROPERTY);
+        descriptors.add(DATE_FORMAT_PROPERTY);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<Relationship>();
@@ -187,10 +197,14 @@ public class GetIEC104 extends AbstractProcessor {
                                     String string1 = informationObject2.getInformationElements()[i][0].toString();
                                     String string2 = informationObject2.getInformationElements()[i][1].toString();
                                     int indexString1 = string1.indexOf(":") + 2;
-                                    int index2String1 = string1.indexOf(",");
+                                    int index2String1 = string1.indexOf(",", indexString1);
                                     int indexString2 = string2.indexOf(":") + 2;
-                                    data = string1.substring(indexString1, index2String1);
-                                    controllerTime = string2.substring(indexString2);
+                                    if (index2String1 > 0){
+                                        data = string1.substring(indexString1, index2String1);
+                                        controllerTime = string2.substring(indexString2);
+                                    } else {
+                                        data = string1.substring(indexString1);
+                                    }
                                 } else if (informationElements[i].length == 3){
                                     String string1 = informationObject2.getInformationElements()[i][0].toString();
                                     String string2 = informationObject2.getInformationElements()[i][2].toString();
@@ -202,7 +216,7 @@ public class GetIEC104 extends AbstractProcessor {
                                     if (informationObject2.getInformationObjectAddress() != 0){
                                         String string1 = informationObject2.getInformationElements()[i][0].toString();
                                         int indexString1 = string1.indexOf(":") + 2;
-                                        int index2String1 = string1.indexOf(",");
+                                        int index2String1 = string1.indexOf(",", indexString1);
                                         data = string1.substring(indexString1, index2String1);
                                     }
                                 }
@@ -211,7 +225,8 @@ public class GetIEC104 extends AbstractProcessor {
                                 Date date = new Date();
                                 millis = date.getTime();
                             } else {
-                                SimpleDateFormat dateFormat = new SimpleDateFormat("MM-dd-yy hh:mm:ss:SSS");
+                                SimpleDateFormat dateFormat = new SimpleDateFormat(context.getProperty(DATE_FORMAT_PROPERTY).getValue());
+                                dateFormat.setTimeZone(TimeZone.getTimeZone("UTC+3"));
                                 Date date = new Date();
                                 try {
                                     date = dateFormat.parse(controllerTime);
