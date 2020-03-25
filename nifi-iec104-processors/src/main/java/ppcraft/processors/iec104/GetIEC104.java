@@ -38,6 +38,8 @@ import org.openmuc.j60870.ie.InformationElement;
 import org.openmuc.j60870.ie.InformationObject;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
@@ -50,8 +52,8 @@ import java.util.*;
 @TriggerSerially
 @CapabilityDescription("Create GetIEC104 Client")
 @SeeAlso({})
-@ReadsAttributes({@ReadsAttribute(attribute="", description="")})
-@WritesAttributes({@WritesAttribute(attribute="", description="")})
+@ReadsAttributes({@ReadsAttribute(attribute = "", description = "")})
+@WritesAttributes({@WritesAttribute(attribute = "", description = "")})
 
 public class GetIEC104 extends AbstractProcessor {
 
@@ -90,18 +92,34 @@ public class GetIEC104 extends AbstractProcessor {
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
             .build();
 
+    public static final PropertyDescriptor TIMEZONE_PROPERTY = new PropertyDescriptor
+            .Builder().name("TIMEZONE")
+            .displayName("TIMEZONE")
+            .description("TIMEZONE")
+            .required(true)
+            .defaultValue("UTC+3")
+            .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .build();
+
     public static final Relationship SUCCESS = new Relationship.Builder()
             .name("success")
             .description("It's okay")
+            .build();
+
+    public static final Relationship BADCONNECT = new Relationship.Builder()
+            .name("bad connect")
+            .description("It's not good(problem from connect)")
             .build();
 
     private List<PropertyDescriptor> descriptors;
 
     private Set<Relationship> relationships;
 
-    private volatile Queue<String> result = new LinkedList<String>();
     private volatile Connection connection;
     private volatile ConnectionEventListener connectionEventListener;
+    private volatile JSONObject jsonObject;
+    private volatile boolean fault;
+    private FlowFile flowFile;
 
     @Override
     protected void init(final ProcessorInitializationContext context) {
@@ -110,11 +128,14 @@ public class GetIEC104 extends AbstractProcessor {
         descriptors.add(PORT_PROPERTY);
         descriptors.add(FULL_PROPERTY);
         descriptors.add(DATE_FORMAT_PROPERTY);
+        descriptors.add(TIMEZONE_PROPERTY);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<Relationship>();
         relationships.add(SUCCESS);
+        relationships.add(BADCONNECT);
         this.relationships = Collections.unmodifiableSet(relationships);
+        fault = false;
     }
 
     @Override
@@ -134,44 +155,40 @@ public class GetIEC104 extends AbstractProcessor {
 
     @Override
     public void onTrigger(final ProcessContext context, final ProcessSession session) throws ProcessException {
-        if (connection == null){
-            readIEC(context);
+        if (connection == null) {
+            readIEC(context, session);
         }
-        if (result.isEmpty()){
-            return;
-        }
-        if (connectionEventListener == null){
+        if (connectionEventListener == null) {
             stopIEC();
             return;
-        }
-        while (!result.isEmpty()){
-            try {
-                String toWrite = result.poll();
-                JSONObject jsonObject = new JSONObject(toWrite);
-                FlowFile flowFile = session.create();
-                flowFile = session.write(flowFile, outputStream -> outputStream.write(toWrite.getBytes(StandardCharsets.UTF_8)));
-                flowFile = session.putAttribute(flowFile, "tag", jsonObject.getString("tag"));
-                flowFile = session.putAttribute(flowFile, "data", jsonObject.getString("data"));
-                flowFile = session.putAttribute(flowFile, "controllerTime", jsonObject.getString("controllerTime"));
-                session.transfer(flowFile, SUCCESS);
-                session.commit();
-            } catch (Exception ex){
-                getLogger().error(ex.toString());
-                stopIEC();
-                return;
-            }
         }
     }
 
     @OnStopped
-    public void onStopped(final ProcessContext context) throws ProcessException{
+    public void onStopped(final ProcessContext context) throws ProcessException {
         stopIEC();
-        if (!result.isEmpty()){
-            result.clear();
+    }
+
+    private synchronized void writeNext(ProcessSession session, String msg) {
+        try {
+            flowFile = session.create();
+            jsonObject = new JSONObject(msg);
+            flowFile = session.write(flowFile, outputStream -> outputStream.write(msg.getBytes(StandardCharsets.UTF_8)));
+            flowFile = session.putAttribute(flowFile, "tag", jsonObject.getString("tag"));
+            flowFile = session.putAttribute(flowFile, "data", jsonObject.getString("data"));
+            flowFile = session.putAttribute(flowFile, "controllerTime", jsonObject.getString("controllerTime"));
+            session.transfer(flowFile, SUCCESS);
+            session.commit();
+        } catch (Exception e) {
+            if (fault) {
+                getLogger().error("message -> " + msg + "; " + e.toString());
+                fault = false;
+            }
+            return;
         }
     }
 
-    private void readIEC(ProcessContext context){
+    private void readIEC(ProcessContext context, ProcessSession session) {
         String ip = context.getProperty(IP_PROPERTY).getValue();
         int port = Integer.parseInt(context.getProperty(PORT_PROPERTY).getValue());
         try {
@@ -181,31 +198,46 @@ public class GetIEC104 extends AbstractProcessor {
             connectionEventListener = new ConnectionEventListener() {
                 @Override
                 public void newASdu(ASdu aSdu) {
+                    if (!fault) {
+                        fault = true;
+                    }
                     InformationObject[] informationObject = aSdu.getInformationObjects();
-                    if (informationObject != null){
+                    if (informationObject != null) {
                         int var3 = informationObject.length;
+                        //check "doubles". If iec-server sends the old value to the same ASdu, and it is not needed. Uncomment lines 208-217, 223, 276.
+//                        Set<Integer> numberDouble = new HashSet<>();
+//                        for (int var4 = 0; var4 < var3; ++var4){
+//                            int testir = informationObject[var4].getInformationObjectAddress();
+//                            for (int var5 = var4 + 1; var5 < var3; ++var5){
+//                                int testirSec = informationObject[var5].getInformationObjectAddress();
+//                                if (testir ==testirSec){
+//                                    numberDouble.add(var4);
+//                                }
+//                            }
+//                        }
                         int tag;
                         String data = "";
                         String controllerTime = "";
                         long millis;
-                        for (int var4 = 0; var4 < var3; ++var4){
+                        for (int var4 = 0; var4 < var3; ++var4) {
+//                            if (!numberDouble.contains(var4)){
                             InformationObject informationObject2 = informationObject[var4];
                             tag = informationObject2.getInformationObjectAddress();
                             InformationElement[][] informationElements = informationObject2.getInformationElements();
-                            for (int i = 0; i < informationElements.length; i++){
-                                if (informationElements[i].length == 2){
+                            for (int i = 0; i < informationElements.length; ++i) {
+                                if (informationElements[i].length == 2) {
                                     String string1 = informationObject2.getInformationElements()[i][0].toString();
                                     String string2 = informationObject2.getInformationElements()[i][1].toString();
                                     int indexString1 = string1.indexOf(":") + 2;
                                     int index2String1 = string1.indexOf(",", indexString1);
                                     int indexString2 = string2.indexOf(":") + 2;
-                                    if (index2String1 > 0){
+                                    if (index2String1 > 0) {
                                         data = string1.substring(indexString1, index2String1);
                                         controllerTime = string2.substring(indexString2);
                                     } else {
                                         data = string1.substring(indexString1);
                                     }
-                                } else if (informationElements[i].length == 3){
+                                } else if (informationElements[i].length == 3) {
                                     String string1 = informationObject2.getInformationElements()[i][0].toString();
                                     String string2 = informationObject2.getInformationElements()[i][2].toString();
                                     int indexString1 = string1.indexOf(":") + 2;
@@ -213,7 +245,7 @@ public class GetIEC104 extends AbstractProcessor {
                                     data = string1.substring(indexString1);
                                     controllerTime = string2.substring(indexString2);
                                 } else {
-                                    if (informationObject2.getInformationObjectAddress() != 0){
+                                    if (informationObject2.getInformationObjectAddress() != 0) {
                                         String string1 = informationObject2.getInformationElements()[i][0].toString();
                                         int indexString1 = string1.indexOf(":") + 2;
                                         int index2String1 = string1.indexOf(",", indexString1);
@@ -221,12 +253,13 @@ public class GetIEC104 extends AbstractProcessor {
                                     }
                                 }
                             }
-                            if (controllerTime.equals("")){
+                            //if controller time not found in the message, it use server time.
+                            if (controllerTime.equals("")) {
                                 Date date = new Date();
                                 millis = date.getTime();
                             } else {
                                 SimpleDateFormat dateFormat = new SimpleDateFormat(context.getProperty(DATE_FORMAT_PROPERTY).getValue());
-                                dateFormat.setTimeZone(TimeZone.getTimeZone("UTC+3"));
+                                dateFormat.setTimeZone(TimeZone.getTimeZone(context.getProperty(TIMEZONE_PROPERTY).getValue()));
                                 Date date = new Date();
                                 try {
                                     date = dateFormat.parse(controllerTime);
@@ -235,8 +268,12 @@ public class GetIEC104 extends AbstractProcessor {
                                 }
                                 millis = date.getTime();
                             }
-                            result.offer("{\"tag\":\"" + tag + "\", \"data\":\"" + data + "\", \"controllerTime\":\"" + millis + "\"}");
+                            if (tag != 0) {
+                                writeNext(session, "{\"tag\":\"" + tag + "\", \"data\":\"" + data + "\", \"controllerTime\":\"" + millis + "\"}");
+                            }
+                            tag = 0;
                             controllerTime = "";
+//                            }
                         }
                     } else {
                         getLogger().error("Private Information");
@@ -245,27 +282,50 @@ public class GetIEC104 extends AbstractProcessor {
 
                 @Override
                 public void connectionClosed(IOException e) {
-                    getLogger().error(e.toString());
-                    if (connection != null){
+                    if (fault) {
+                        logException(e);
+                        flowFile = session.create();
+                        flowFile = session.write(flowFile, outputStream -> outputStream.write(e.toString().getBytes(StandardCharsets.UTF_8)));
+                        session.transfer(flowFile, BADCONNECT);
+                        session.commit();
+                        fault = false;
+                    }
+                    if (connection != null) {
                         connection = null;
                     }
                 }
             };
-            if (context.getProperty(FULL_PROPERTY).getValue().equals("true")){
+            connection.startDataTransfer(connectionEventListener, 0);
+            if (context.getProperty(FULL_PROPERTY).getValue().equals("true")) {
                 connection.interrogation(65535, CauseOfTransmission.ACTIVATION, new IeQualifierOfInterrogation(20));
             }
-            connection.startDataTransfer(connectionEventListener, 50);
-        } catch (UnknownHostException ex){
-            getLogger().error(ex.toString());
+        } catch (UnknownHostException e) {
+            if (fault) {
+                logException(e);
+                flowFile = session.create();
+                flowFile = session.write(flowFile, outputStream -> outputStream.write(e.toString().getBytes(StandardCharsets.UTF_8)));
+                session.transfer(flowFile, BADCONNECT);
+                session.commit();
+                fault = false;
+            }
             stopIEC();
-        } catch (IOException ex){
-            getLogger().error(ex.toString());
+        } catch (IOException e) {
+            if (fault) {
+                logException(e);
+                fault = false;
+            }
             stopIEC();
         }
     }
 
-    private void stopIEC(){
-        if (connection != null){
+    private void logException(Exception e) {
+        StringWriter errors = new StringWriter();
+        e.printStackTrace(new PrintWriter(errors));
+        getLogger().error(errors.toString());
+    }
+
+    private void stopIEC() {
+        if (connection != null) {
             connection.close();
             connection = null;
         }
